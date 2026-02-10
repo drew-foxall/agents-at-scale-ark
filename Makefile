@@ -36,6 +36,21 @@ quickstart-force: # Force quickstart to run
 quickstart-reconfigure-default-model: # HELP: reconfigure the default model with fresh credentials
 	@./scripts/quickstart-reconfigure-default-model.sh
 
+.PHONY: local
+local: ## Start Ark locally (requires process-compose)
+	@if command -v ark >/dev/null 2>&1 && ark dev --help >/dev/null 2>&1; then ark dev; \
+	else scripts/local/ensure-deps.sh && process-compose -p 9100 -f process-compose.yaml -e .env.dev up; fi
+
+.PHONY: local-stop
+local-stop: ## Stop local Ark services
+	@if command -v ark >/dev/null 2>&1 && ark dev --help >/dev/null 2>&1; then ark dev stop; \
+	else process-compose -p 9100 down 2>/dev/null || echo "Ark local dev is not running"; fi
+
+.PHONY: local-clean
+local-clean: ## Remove local cluster and kubeconfig
+	@kind delete cluster --name ark-local 2>/dev/null || true
+	@rm -f out/local-kubeconfig
+
 # NB: note that quickstart doesn't depend on this because we always want that to run as today
 $(STAMP_QUICKSTART): | $(OUT)
 	@./scripts/quickstart.sh

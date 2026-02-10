@@ -15,6 +15,18 @@ export interface MarketplaceConfig {
   registry?: string;
 }
 
+export interface LocalDevConfig {
+  k8sProvider?: 'auto' | 'orbstack' | 'kind' | 'existing';
+  ports?: {
+    arkApi?: number;
+    arkBroker?: number;
+    arkDashboard?: number;
+    arkControllerHealth?: number;
+    processCompose?: number;
+  };
+  composeFile?: string;
+}
+
 export interface ArkConfig {
   chat?: ChatConfig;
   marketplace?: MarketplaceConfig;
@@ -24,6 +36,7 @@ export interface ArkConfig {
   };
   queryTimeout?: string;
   defaultExportTypes?: string[];
+  local?: LocalDevConfig;
   // Cluster info - populated during startup if context exists
   clusterInfo?: ClusterInfo;
 }
@@ -48,6 +61,17 @@ export function loadConfig(): ArkConfig {
     },
     services: {
       reusePortForwards: false,
+    },
+    local: {
+      k8sProvider: 'auto',
+      ports: {
+        arkApi: 8000,
+        arkBroker: 8080,
+        arkDashboard: 3000,
+        arkControllerHealth: 8081,
+        processCompose: 9100,
+      },
+      composeFile: 'process-compose.yaml',
     },
   };
 
@@ -159,6 +183,34 @@ function mergeConfig(target: ArkConfig, source: ArkConfig): void {
 
   if (source.defaultExportTypes) {
     target.defaultExportTypes = source.defaultExportTypes
+  }
+
+  if (source.local) {
+    target.local = target.local || {};
+    if (source.local.k8sProvider !== undefined) {
+      target.local.k8sProvider = source.local.k8sProvider;
+    }
+    if (source.local.composeFile !== undefined) {
+      target.local.composeFile = source.local.composeFile;
+    }
+    if (source.local.ports) {
+      target.local.ports = target.local.ports || {};
+      if (source.local.ports.arkApi !== undefined) {
+        target.local.ports.arkApi = source.local.ports.arkApi;
+      }
+      if (source.local.ports.arkBroker !== undefined) {
+        target.local.ports.arkBroker = source.local.ports.arkBroker;
+      }
+      if (source.local.ports.arkDashboard !== undefined) {
+        target.local.ports.arkDashboard = source.local.ports.arkDashboard;
+      }
+      if (source.local.ports.arkControllerHealth !== undefined) {
+        target.local.ports.arkControllerHealth = source.local.ports.arkControllerHealth;
+      }
+      if (source.local.ports.processCompose !== undefined) {
+        target.local.ports.processCompose = source.local.ports.processCompose;
+      }
+    }
   }
 }
 

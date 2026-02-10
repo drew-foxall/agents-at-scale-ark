@@ -16,6 +16,7 @@ import {createClusterCommand} from './commands/cluster/index.js';
 import {createCompletionCommand} from './commands/completion/index.js';
 import {createDashboardCommand} from './commands/dashboard/index.js';
 import {createDocsCommand} from './commands/docs/index.js';
+import {createDevCommand} from './commands/dev/index.js';
 import {createEvaluationCommand} from './commands/evaluation/index.js';
 import {createExportCommand} from './commands/export/index.js';
 import {createGenerateCommand} from './commands/generate/index.js';
@@ -60,6 +61,7 @@ async function main() {
   program.addCommand(createCompletionCommand(config));
   program.addCommand(createDashboardCommand(config));
   program.addCommand(createDocsCommand(config));
+  program.addCommand(createDevCommand(config));
   program.addCommand(createEvaluationCommand(config));
   program.addCommand(createExportCommand(config));
   program.addCommand(createGenerateCommand(config));
