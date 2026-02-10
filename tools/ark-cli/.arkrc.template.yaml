@@ -49,12 +49,3 @@ services:
 #   k8sServiceName: string     - Kubernetes service name for port forwarding
 #   k8sServicePort: number     - Kubernetes service port for port forwarding
 #   k8sPortForwardLocalPort: number - Local port for port forwarding
-local:
-  k8sProvider: auto
-  ports:
-    arkApi: 8000
-    arkBroker: 8080
-    arkDashboard: 3000
-    arkControllerHealth: 8081
-    processCompose: 9100
-  composeFile: process-compose.yaml

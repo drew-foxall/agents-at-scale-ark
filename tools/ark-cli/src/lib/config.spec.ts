@@ -53,17 +53,6 @@ describe('config', () => {
       services: {
         reusePortForwards: false,
       },
-      local: {
-        k8sProvider: 'auto',
-        ports: {
-          arkApi: 8000,
-          arkBroker: 8080,
-          arkDashboard: 3000,
-          arkControllerHealth: 8081,
-          processCompose: 9100,
-        },
-        composeFile: 'process-compose.yaml',
-      },
     });
   });
 

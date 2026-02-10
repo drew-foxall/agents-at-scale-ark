@@ -39,7 +39,6 @@ __pycache__/
 .ark-sdk-local/
 .ark.env
 ark-export.yaml
-.pc_env
 
 # Icon must end with two \r
 Icon

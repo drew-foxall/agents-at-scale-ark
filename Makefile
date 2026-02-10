@@ -37,14 +37,14 @@ quickstart-reconfigure-default-model: # HELP: reconfigure the default model with
 	@./scripts/quickstart-reconfigure-default-model.sh
 
 .PHONY: local
-local: ## Start Ark locally (requires process-compose)
+local: ## Start Ark locally with DevSpace
 	@if command -v ark >/dev/null 2>&1 && ark dev --help >/dev/null 2>&1; then ark dev; \
-	else scripts/local/ensure-deps.sh && process-compose -p 9100 -f process-compose.yaml -e .env.dev up; fi
+	else devspace dev; fi
 
 .PHONY: local-stop
 local-stop: ## Stop local Ark services
 	@if command -v ark >/dev/null 2>&1 && ark dev --help >/dev/null 2>&1; then ark dev stop; \
-	else process-compose -p 9100 down 2>/dev/null || echo "Ark local dev is not running"; fi
+	else devspace purge; fi
 
 .PHONY: local-clean
 local-clean: ## Remove local cluster and kubeconfig
