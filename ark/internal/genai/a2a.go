@@ -476,12 +476,6 @@ func StreamA2AAgent(ctx context.Context, k8sClient client.Client, address string
 	}
 }
 
-// A2AHistoryMessage represents a message in A2A history format for metadata injection
-type A2AHistoryMessage struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
-}
-
 // ExecuteA2AAgentWithHistory executes A2A agent with conversation history injected via metadata
 func ExecuteA2AAgentWithHistory(
 	ctx context.Context,
@@ -501,37 +495,12 @@ func ExecuteA2AAgentWithHistory(
 		return nil, err
 	}
 
-	content := ""
-	if userInput.OfUser != nil && userInput.OfUser.Content.OfString.Value != "" {
-		content = userInput.OfUser.Content.OfString.Value
-	}
-
-	var message protocol.Message
-	if contextID != "" {
-		message = protocol.NewMessageWithContext(protocol.MessageRoleUser, []protocol.Part{
-			protocol.NewTextPart(content),
-		}, nil, &contextID)
-	} else {
-		message = protocol.NewMessage(protocol.MessageRoleUser, []protocol.Part{
-			protocol.NewTextPart(content),
-		})
-	}
-
-	blocking := true
-	params := protocol.SendMessageParams{
-		RPCID:   protocol.GenerateRPCID(),
-		Message: message,
-		Configuration: &protocol.SendMessageConfiguration{
-			Blocking: &blocking,
-		},
-	}
-
+	metadata := map[string]interface{}{}
 	a2aHistory := convertToA2AHistory(history)
 	if len(a2aHistory) > 0 {
-		params.Metadata = map[string]interface{}{
-			"https://ark.mckinsey.com/extensions/history/v1": a2aHistory,
-		}
+		metadata[a2aHistoryExtensionKey] = a2aHistory
 	}
+	params := buildA2ASendMessageParams(userInput, contextID, metadata, true)
 
 	result, err := a2aClient.SendMessage(ctx, params)
 	if err != nil {
@@ -542,42 +511,6 @@ func ExecuteA2AAgentWithHistory(
 	}
 
 	return extractResponseFromMessageResult(ctx, k8sClient, result, agentName, namespace, queryName, nil)
-}
-
-func convertToA2AHistory(messages []Message) []A2AHistoryMessage {
-	var history []A2AHistoryMessage
-
-	for _, msg := range messages {
-		var role, content string
-
-		if msg.OfUser != nil {
-			role = "user"
-			if msg.OfUser.Content.OfString.Value != "" {
-				content = msg.OfUser.Content.OfString.Value
-			}
-		} else if msg.OfAssistant != nil {
-			role = "assistant"
-			if msg.OfAssistant.Content.OfString.Value != "" {
-				content = msg.OfAssistant.Content.OfString.Value
-			}
-		} else if msg.OfSystem != nil {
-			role = "system"
-			if msg.OfSystem.Content.OfString.Value != "" {
-				content = msg.OfSystem.Content.OfString.Value
-			}
-		} else {
-			continue
-		}
-
-		if content != "" {
-			history = append(history, A2AHistoryMessage{
-				Role:    role,
-				Content: content,
-			})
-		}
-	}
-
-	return history
 }
 
 // CreateA2AClient creates and configures A2A client with header resolution and injection
