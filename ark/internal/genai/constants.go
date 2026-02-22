@@ -47,6 +47,20 @@ const (
 	RoleTool      = "tool"
 )
 
+const (
+	MetadataRoleKey       = "ark.mckinsey.com/role"
+	MetadataToolCallIDKey = "ark.mckinsey.com/tool-call-id"
+	MetadataToolNameKey   = "ark.mckinsey.com/tool-name"
+	MetadataToolCallsKey  = "ark.mckinsey.com/tool-calls"
+	MetadataAgentNameKey  = "ark.mckinsey.com/agent-name"
+	MetadataA2AResultKey  = "ark.mckinsey.com/a2a-result"
+)
+
+const (
+	A2APayloadModeCompat = "compat"
+	A2APayloadModeNative = "native-a2a"
+)
+
 // Tool type constants
 const (
 	ToolTypeHTTP    = "http"

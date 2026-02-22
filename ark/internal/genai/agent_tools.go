@@ -4,11 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
+	"trpc.group/trpc-go/trpc-a2a-go/protocol"
 
 	arkv1alpha1 "mckinsey.com/ark/api/v1alpha1"
 	"mckinsey.com/ark/internal/eventing"
@@ -279,6 +281,281 @@ type AgentToolExecutor struct {
 	eventing  eventing.Provider
 }
 
+type delegatedInvocation struct {
+	userInput    Message
+	history      []Message
+	a2aUserInput protocol.Message
+	a2aHistory   []protocol.Message
+	contextID    string
+}
+
+func resolveDelegationMode(ctx context.Context, targetAnnotations map[string]string) string {
+	return ResolveDelegationPayloadMode(ctx, targetAnnotations)
+}
+
+func parseLegacyDelegationInput(arguments map[string]any, targetType, targetName string) (delegatedInvocation, string, error) {
+	input, exists := arguments["input"]
+	if !exists {
+		return delegatedInvocation{}, "input parameter is required", fmt.Errorf("input parameter is required for %s tool %s", targetType, targetName)
+	}
+	inputStr, ok := input.(string)
+	if !ok {
+		return delegatedInvocation{}, "input parameter must be a string", fmt.Errorf("input parameter must be a string for %s tool %s", targetType, targetName)
+	}
+	return delegatedInvocation{
+		userInput: NewUserMessage(inputStr),
+		history:   []Message{},
+	}, "", nil
+}
+
+func parseA2AMessageArgument(rawValue any) (protocol.Message, error) {
+	rawJSON, err := json.Marshal(rawValue)
+	if err != nil {
+		return protocol.Message{}, fmt.Errorf("failed to serialize message argument: %w", err)
+	}
+	var message protocol.Message
+	if err := json.Unmarshal(rawJSON, &message); err != nil {
+		return protocol.Message{}, fmt.Errorf("failed to parse message argument: %w", err)
+	}
+	if len(message.Parts) == 0 {
+		return protocol.Message{}, fmt.Errorf("message argument must include at least one part")
+	}
+	return message, nil
+}
+
+func parseA2AHistoryArgument(rawValue any) ([]protocol.Message, error) {
+	rawJSON, err := json.Marshal(rawValue)
+	if err != nil {
+		return nil, fmt.Errorf("failed to serialize history argument: %w", err)
+	}
+	var history []protocol.Message
+	if err := json.Unmarshal(rawJSON, &history); err != nil {
+		return nil, fmt.Errorf("failed to parse history argument: %w", err)
+	}
+	return history, nil
+}
+
+func parseNativeDelegationInput(arguments map[string]any, targetType, targetName string) (delegatedInvocation, string, error) {
+	invocation := delegatedInvocation{
+		a2aHistory: []protocol.Message{},
+	}
+	if rawContextID, exists := arguments["contextId"]; exists {
+		contextID, ok := rawContextID.(string)
+		if !ok {
+			return delegatedInvocation{}, "contextId parameter must be a string", fmt.Errorf("contextId parameter must be a string for %s tool %s", targetType, targetName)
+		}
+		normalizedContextID, err := normalizeContextID(contextID)
+		if err != nil {
+			return delegatedInvocation{}, "contextId parameter is invalid", err
+		}
+		invocation.contextID = normalizedContextID
+	}
+	if rawHistory, exists := arguments["history"]; exists {
+		history, err := parseA2AHistoryArgument(rawHistory)
+		if err != nil {
+			return delegatedInvocation{}, "history parameter is invalid", err
+		}
+		invocation.a2aHistory = history
+	}
+	if rawMessage, exists := arguments["message"]; exists {
+		message, err := parseA2AMessageArgument(rawMessage)
+		if err != nil {
+			return delegatedInvocation{}, "message parameter is invalid", err
+		}
+		invocation.a2aUserInput = message
+		return invocation, "", nil
+	}
+	input, exists := arguments["input"]
+	if !exists {
+		return delegatedInvocation{}, "message parameter is required", fmt.Errorf("message parameter is required for %s tool %s", targetType, targetName)
+	}
+	inputStr, ok := input.(string)
+	if !ok {
+		return delegatedInvocation{}, "input parameter must be a string", fmt.Errorf("input parameter must be a string for %s tool %s", targetType, targetName)
+	}
+	invocation.a2aUserInput = protocol.NewMessage(protocol.MessageRoleUser, []protocol.Part{
+		protocol.NewTextPart(inputStr),
+	})
+	return invocation, "", nil
+}
+
+func parseDelegatedInvocation(arguments map[string]any, payloadMode, targetType, targetName string) (delegatedInvocation, string, error) {
+	if payloadMode == A2APayloadModeNative {
+		return parseNativeDelegationInput(arguments, targetType, targetName)
+	}
+	return parseLegacyDelegationInput(arguments, targetType, targetName)
+}
+
+func applyDelegationContext(ctx context.Context, payloadMode, contextID string) context.Context {
+	ctx = WithA2AExperimentalEnabled(ctx, payloadMode == A2APayloadModeNative)
+	ctx = WithA2APayloadMode(ctx, payloadMode)
+	if contextID == "" {
+		return ctx
+	}
+	return WithA2AContextID(ctx, contextID)
+}
+
+func getDelegationEventStream(ctx context.Context, payloadMode string) EventStreamInterface {
+	if payloadMode != A2APayloadModeNative {
+		return nil
+	}
+	return GetToolEventStream(ctx)
+}
+
+func normalizeContextID(contextID string) (string, error) {
+	trimmed := strings.TrimSpace(contextID)
+	if contextID != "" && trimmed == "" {
+		return "", fmt.Errorf("contextId parameter must not contain only whitespace")
+	}
+	if len(trimmed) > 1024 {
+		return "", fmt.Errorf("contextId parameter exceeds max length")
+	}
+	return trimmed, nil
+}
+
+func serializeArtifactPart(part protocol.Part) map[string]interface{} {
+	taskPart := convertPartFromProtocol(part)
+	result := map[string]interface{}{
+		"kind": taskPart.Kind,
+	}
+	if taskPart.Text != "" {
+		result["text"] = taskPart.Text
+	}
+	if taskPart.Data != "" {
+		result["data"] = taskPart.Data
+	}
+	if taskPart.MimeType != "" {
+		result["mimeType"] = taskPart.MimeType
+	}
+	if taskPart.URI != "" {
+		result["uri"] = taskPart.URI
+	}
+	if len(taskPart.Metadata) > 0 {
+		result["metadata"] = taskPart.Metadata
+	}
+	return result
+}
+
+func serializeA2AMessage(message *protocol.Message) map[string]interface{} {
+	if message == nil {
+		return nil
+	}
+	result := map[string]interface{}{
+		"role": message.Role,
+	}
+	if message.MessageID != "" {
+		result["messageId"] = message.MessageID
+	}
+	if message.TaskID != nil && *message.TaskID != "" {
+		result["taskId"] = *message.TaskID
+	}
+	if message.ContextID != nil && *message.ContextID != "" {
+		result["contextId"] = *message.ContextID
+	}
+	parts := make([]map[string]interface{}, 0, len(message.Parts))
+	for _, part := range message.Parts {
+		parts = append(parts, serializeArtifactPart(part))
+	}
+	if len(parts) > 0 {
+		result["parts"] = parts
+	}
+	if len(message.Metadata) > 0 {
+		result["metadata"] = message.Metadata
+	}
+	return result
+}
+
+func serializeA2AArtifacts(artifacts []protocol.Artifact) []map[string]interface{} {
+	serialized := make([]map[string]interface{}, 0, len(artifacts))
+	for _, artifact := range artifacts {
+		item := map[string]interface{}{
+			"artifactId": artifact.ArtifactID,
+		}
+		if artifact.Name != nil && *artifact.Name != "" {
+			item["name"] = *artifact.Name
+		}
+		if artifact.Description != nil && *artifact.Description != "" {
+			item["description"] = *artifact.Description
+		}
+		if len(artifact.Metadata) > 0 {
+			item["metadata"] = artifact.Metadata
+		}
+		parts := make([]map[string]interface{}, 0, len(artifact.Parts))
+		for _, part := range artifact.Parts {
+			parts = append(parts, serializeArtifactPart(part))
+		}
+		if len(parts) > 0 {
+			item["parts"] = parts
+		}
+		serialized = append(serialized, item)
+	}
+	return serialized
+}
+
+func buildDelegatedToolResultMetadata(result *ExecutionResult) map[string]interface{} {
+	if result == nil {
+		return nil
+	}
+	metadata := map[string]interface{}{}
+	if result.A2AResponse != nil {
+		if result.A2AResponse.ContextID != "" {
+			metadata["contextId"] = result.A2AResponse.ContextID
+		}
+		if result.A2AResponse.TaskID != "" {
+			metadata["taskId"] = result.A2AResponse.TaskID
+		}
+		if result.A2AResponse.Message != nil {
+			metadata["message"] = serializeA2AMessage(result.A2AResponse.Message)
+		}
+		if len(result.A2AResponse.Artifacts) > 0 {
+			metadata["artifacts"] = serializeA2AArtifacts(result.A2AResponse.Artifacts)
+		}
+	}
+	if len(result.A2AMessages) > 0 {
+		last := result.A2AMessages[len(result.A2AMessages)-1]
+		if last.ContextID != nil && *last.ContextID != "" {
+			metadata["contextId"] = *last.ContextID
+		}
+		if last.TaskID != nil && *last.TaskID != "" {
+			metadata["taskId"] = *last.TaskID
+		}
+		metadata["message"] = serializeA2AMessage(&last)
+	}
+	if len(metadata) == 0 {
+		return nil
+	}
+	return metadata
+}
+
+func buildDelegatedToolResultContent(content string, metadata map[string]interface{}, experimentalNative bool) (string, error) {
+	if len(metadata) == 0 {
+		return content, nil
+	}
+
+	if experimentalNative {
+		envelope := make(map[string]interface{}, len(metadata)+1)
+		for key, value := range metadata {
+			envelope[key] = value
+		}
+		if content != "" {
+			envelope["content"] = content
+		}
+		raw, err := json.Marshal(envelope)
+		if err != nil {
+			return "", fmt.Errorf("failed to serialize native delegated tool result: %w", err)
+		}
+		return string(raw), nil
+	}
+
+	if content == "" {
+		raw, err := json.Marshal(metadata)
+		if err == nil {
+			return string(raw), nil
+		}
+	}
+	return content, nil
+}
+
 func (a *AgentToolExecutor) Execute(ctx context.Context, call ToolCall) (ToolResult, error) {
 	var arguments map[string]any
 	if err := json.Unmarshal([]byte(call.Function.Arguments), &arguments); err != nil {
@@ -291,25 +568,16 @@ func (a *AgentToolExecutor) Execute(ctx context.Context, call ToolCall) (ToolRes
 		}, fmt.Errorf("failed to parse tool arguments: %v", err)
 	}
 
-	input, exists := arguments["input"]
-	if !exists {
+	payloadMode := resolveDelegationMode(ctx, a.AgentCRD.Annotations)
+	invocation, userError, err := parseDelegatedInvocation(arguments, payloadMode, "agent", a.AgentName)
+	if err != nil {
 		return ToolResult{
 			ID:    call.ID,
 			Name:  call.Function.Name,
-			Error: "input parameter is required",
-		}, fmt.Errorf("input parameter is required for agent tool %s", a.AgentName)
+			Error: userError,
+		}, err
 	}
 
-	inputStr, ok := input.(string)
-	if !ok {
-		return ToolResult{
-			ID:    call.ID,
-			Name:  call.Function.Name,
-			Error: "input parameter must be a string",
-		}, fmt.Errorf("input parameter must be a string for agent tool %s", a.AgentName)
-	}
-
-	// Create the Agent object using the Agent CRD
 	agent, err := MakeAgent(ctx, a.k8sClient, a.AgentCRD, a.telemetry, a.eventing)
 	if err != nil {
 		return ToolResult{
@@ -319,14 +587,14 @@ func (a *AgentToolExecutor) Execute(ctx context.Context, call ToolCall) (ToolRes
 		}, err
 	}
 
-	// Prepare user input. No conversation history is ever provided
-	userInput := NewUserMessage(inputStr)
-	history := []Message{}
-
-	// Call the agent's Execute function
-	// Pass nil for memory and eventStream (agents-as-tools don't use memory or streaming)
-	// See ARKQB-137 for discussion on streaming support for agents as tools
-	result, err := agent.Execute(ctx, userInput, history, nil, nil)
+	execCtx := applyDelegationContext(ctx, payloadMode, invocation.contextID)
+	eventStream := getDelegationEventStream(ctx, payloadMode)
+	var result *ExecutionResult
+	if payloadMode == A2APayloadModeNative {
+		result, err = agent.ExecuteA2A(execCtx, invocation.a2aUserInput, invocation.a2aHistory, nil, eventStream)
+	} else {
+		result, err = agent.Execute(execCtx, invocation.userInput, invocation.history, nil, eventStream)
+	}
 	if err != nil {
 		return ToolResult{
 			ID:    call.ID,
@@ -335,7 +603,25 @@ func (a *AgentToolExecutor) Execute(ctx context.Context, call ToolCall) (ToolRes
 		}, err
 	}
 
-	content := ExtractLastAssistantMessageContent(result.Messages)
+	content := ""
+	if len(result.A2AMessages) > 0 {
+		content = ExtractA2ATextFromMessage(result.A2AMessages[len(result.A2AMessages)-1])
+	} else {
+		content = ExtractLastAssistantMessageContent(result.Messages)
+	}
+	metadata := buildDelegatedToolResultMetadata(result)
+	if content == "" && result.A2AResponse != nil {
+		content = result.A2AResponse.Content
+	}
+	experimentalNative := payloadMode == A2APayloadModeNative && IsA2AExperimentalEnabledInContext(execCtx)
+	content, err = buildDelegatedToolResultContent(content, metadata, experimentalNative)
+	if err != nil {
+		return ToolResult{
+			ID:    call.ID,
+			Name:  call.Function.Name,
+			Error: "failed to serialize delegated A2A result",
+		}, err
+	}
 	if content == "" {
 		return ToolResult{
 			ID:    call.ID,
@@ -345,9 +631,10 @@ func (a *AgentToolExecutor) Execute(ctx context.Context, call ToolCall) (ToolRes
 	}
 
 	return ToolResult{
-		ID:      call.ID,
-		Name:    call.Function.Name,
-		Content: content,
+		ID:       call.ID,
+		Name:     call.Function.Name,
+		Content:  content,
+		Metadata: metadata,
 	}, nil
 }
 
@@ -373,25 +660,16 @@ func (t *TeamToolExecutor) Execute(ctx context.Context, call ToolCall) (ToolResu
 		}, fmt.Errorf("failed to parse tool arguments: %v", err)
 	}
 
-	input, exists := arguments["input"]
-	if !exists {
+	payloadMode := resolveDelegationMode(ctx, t.TeamCRD.Annotations)
+	invocation, userError, err := parseDelegatedInvocation(arguments, payloadMode, "team", t.TeamName)
+	if err != nil {
 		return ToolResult{
 			ID:    call.ID,
 			Name:  call.Function.Name,
-			Error: "input parameter is required",
-		}, fmt.Errorf("input parameter is required for team tool %s", t.TeamName)
+			Error: userError,
+		}, err
 	}
 
-	inputStr, ok := input.(string)
-	if !ok {
-		return ToolResult{
-			ID:    call.ID,
-			Name:  call.Function.Name,
-			Error: "input parameter must be a string",
-		}, fmt.Errorf("input parameter must be a string for team tool %s", t.TeamName)
-	}
-
-	// Create the Team object using the Team CRD and providers
 	team, err := MakeTeam(ctx, t.k8sClient, t.TeamCRD, t.telemetryProvider, t.eventingProvider)
 	if err != nil {
 		return ToolResult{
@@ -401,11 +679,14 @@ func (t *TeamToolExecutor) Execute(ctx context.Context, call ToolCall) (ToolResu
 		}, err
 	}
 
-	// Prepare user input. No conversation history is ever provided
-	userInput := NewUserMessage(inputStr)
-	history := []Message{}
-
-	result, err := team.Execute(ctx, userInput, history, nil, nil)
+	execCtx := applyDelegationContext(ctx, payloadMode, invocation.contextID)
+	eventStream := getDelegationEventStream(ctx, payloadMode)
+	var result *ExecutionResult
+	if payloadMode == A2APayloadModeNative {
+		result, err = team.ExecuteA2A(execCtx, invocation.a2aUserInput, invocation.a2aHistory, nil, eventStream)
+	} else {
+		result, err = team.Execute(execCtx, invocation.userInput, invocation.history, nil, eventStream)
+	}
 	if err != nil {
 		return ToolResult{
 			ID:    call.ID,
@@ -414,7 +695,7 @@ func (t *TeamToolExecutor) Execute(ctx context.Context, call ToolCall) (ToolResu
 		}, err
 	}
 
-	if len(result.Messages) == 0 {
+	if len(result.Messages) == 0 && len(result.A2AMessages) == 0 {
 		return ToolResult{
 			ID:    call.ID,
 			Name:  call.Function.Name,
@@ -422,7 +703,25 @@ func (t *TeamToolExecutor) Execute(ctx context.Context, call ToolCall) (ToolResu
 		}, fmt.Errorf("team %s execution returned no messages", t.TeamName)
 	}
 
-	content := ExtractLastAssistantMessageContent(result.Messages)
+	content := ""
+	if len(result.A2AMessages) > 0 {
+		content = ExtractA2ATextFromMessage(result.A2AMessages[len(result.A2AMessages)-1])
+	} else {
+		content = ExtractLastAssistantMessageContent(result.Messages)
+	}
+	metadata := buildDelegatedToolResultMetadata(result)
+	if content == "" && result.A2AResponse != nil {
+		content = result.A2AResponse.Content
+	}
+	experimentalNative := payloadMode == A2APayloadModeNative && IsA2AExperimentalEnabledInContext(execCtx)
+	content, err = buildDelegatedToolResultContent(content, metadata, experimentalNative)
+	if err != nil {
+		return ToolResult{
+			ID:    call.ID,
+			Name:  call.Function.Name,
+			Error: "failed to serialize delegated A2A result",
+		}, err
+	}
 	if content == "" {
 		return ToolResult{
 			ID:    call.ID,
@@ -432,8 +731,9 @@ func (t *TeamToolExecutor) Execute(ctx context.Context, call ToolCall) (ToolResu
 	}
 
 	return ToolResult{
-		ID:      call.ID,
-		Name:    call.Function.Name,
-		Content: content,
+		ID:       call.ID,
+		Name:     call.Function.Name,
+		Content:  content,
+		Metadata: metadata,
 	}, nil
 }

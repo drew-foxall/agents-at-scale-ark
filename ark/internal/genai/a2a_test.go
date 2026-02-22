@@ -1,10 +1,15 @@
 package genai
 
 import (
+	"io"
+	"net/http"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"trpc.group/trpc-go/trpc-a2a-go/protocol"
+
+	arkann "mckinsey.com/ark/internal/annotations"
 )
 
 func TestExtractTextFromTask(t *testing.T) {
@@ -240,6 +245,27 @@ func TestExtractTextFromParts(t *testing.T) {
 			},
 			expected: "Part 1 Part 2",
 		},
+		{
+			name: "data and file parts",
+			parts: []protocol.Part{
+				&protocol.DataPart{
+					Data: map[string]any{"key": "value"},
+				},
+				&protocol.FilePart{
+					File: &protocol.FileWithURI{URI: "https://example.com/result.txt"},
+				},
+			},
+			expected: `{"key":"value"}https://example.com/result.txt`,
+		},
+		{
+			name: "file bytes part",
+			parts: []protocol.Part{
+				&protocol.FilePart{
+					File: &protocol.FileWithBytes{Bytes: "YWJj"},
+				},
+			},
+			expected: "file-bytes",
+		},
 	}
 
 	for _, tt := range tests {
@@ -248,4 +274,97 @@ func TestExtractTextFromParts(t *testing.T) {
 			assert.Equal(t, tt.expected, result)
 		})
 	}
+}
+
+func TestBuildA2AMetadataWithHistory(t *testing.T) {
+	annotations := map[string]string{
+		arkann.A2AHistoryEnabled:      TrueString,
+		arkann.A2AHistoryLimit:        "1",
+		arkann.A2ASupportedExtensions: `["https://ark.mckinsey.com/extensions/history/v1"]`,
+	}
+	first, err := OpenAIToA2AMessage(NewUserMessage("first"))
+	assert.NoError(t, err)
+	second, err := OpenAIToA2AMessage(NewAssistantMessage("second"))
+	assert.NoError(t, err)
+	history := []protocol.Message{first, second}
+
+	metadata, err := buildA2AMetadata(annotations, history, true)
+
+	assert.NoError(t, err)
+	assert.NotNil(t, metadata)
+	rawHistory, ok := metadata[a2aHistoryExtensionKey]
+	assert.True(t, ok)
+	historyList, ok := rawHistory.([]protocol.Message)
+	assert.True(t, ok)
+	assert.Len(t, historyList, 1)
+	assert.Equal(t, protocol.MessageRoleAgent, historyList[0].Role)
+}
+
+func TestBuildA2AMetadataPermissions(t *testing.T) {
+	permissions := `{"subject":"user-123","scopes":["agents:read"]}`
+	annotations := map[string]string{
+		arkann.A2APermissions:         permissions,
+		arkann.A2ASupportedExtensions: `["https://ark.mckinsey.com/extensions/permissions/v1"]`,
+	}
+
+	metadata, err := buildA2AMetadata(annotations, nil, false)
+
+	assert.NoError(t, err)
+	assert.NotNil(t, metadata)
+	permissionsValue, ok := metadata[a2aPermissionsExtensionKey]
+	assert.True(t, ok)
+	permissionsMap, ok := permissionsValue.(map[string]interface{})
+	assert.True(t, ok)
+	assert.Equal(t, "user-123", permissionsMap["subject"])
+}
+
+func TestBuildA2AMetadataPermissionsUnsupported(t *testing.T) {
+	permissions := `{"subject":"user-123","scopes":["agents:read"]}`
+	annotations := map[string]string{
+		arkann.A2APermissions: permissions,
+	}
+
+	metadata, err := buildA2AMetadata(annotations, nil, false)
+
+	assert.NoError(t, err)
+	if metadata != nil {
+		_, ok := metadata[a2aPermissionsExtensionKey]
+		assert.False(t, ok)
+	}
+}
+
+func TestBuildA2AMetadataPermissionsInvalid(t *testing.T) {
+	permissions := `{"scopes":["agents:read"]}`
+	annotations := map[string]string{
+		arkann.A2APermissions:         permissions,
+		arkann.A2ASupportedExtensions: `["https://ark.mckinsey.com/extensions/permissions/v1"]`,
+	}
+
+	_, err := buildA2AMetadata(annotations, nil, false)
+
+	assert.Error(t, err)
+}
+
+func TestExtractA2AExtensionsHeaderFromRequestBody(t *testing.T) {
+	body := `{"jsonrpc":"2.0","id":"1","method":"message/send","params":{"message":{"extensions":["https://example.com/ext/b/v1","https://example.com/ext/a/v1"]}}}`
+	req, err := http.NewRequest(http.MethodPost, "http://example.com/rpc", strings.NewReader(body))
+	assert.NoError(t, err)
+	req.Header.Set(a2aExtensionsHeader, "https://example.com/ext/base/v1")
+
+	headerValue := extractA2AExtensionsHeader(req)
+	assert.Equal(t, "https://example.com/ext/a/v1, https://example.com/ext/b/v1, https://example.com/ext/base/v1", headerValue)
+
+	restoredBody, readErr := io.ReadAll(req.Body)
+	assert.NoError(t, readErr)
+	assert.Equal(t, body, string(restoredBody))
+}
+
+func TestExtractA2AExtensionsHeaderWithoutExtensions(t *testing.T) {
+	body := `{"jsonrpc":"2.0","id":"1","method":"message/send","params":{"message":{}}}`
+	req, err := http.NewRequest(http.MethodPost, "http://example.com/rpc", strings.NewReader(body))
+	assert.NoError(t, err)
+	req.Header.Set(a2aExtensionsHeader, "https://example.com/ext/base/v1")
+
+	headerValue := extractA2AExtensionsHeader(req)
+	assert.Equal(t, "https://example.com/ext/base/v1", headerValue)
 }
